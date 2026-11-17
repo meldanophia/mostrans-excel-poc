@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mostrans Price Tools POC 05.3</title>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mostrans Price Tools POC 05.4</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 <style>*{box-sizing:border-box}body{font:13px Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#153044;margin:0}header{background:#10334b;color:white;padding:17px}h1{font-size:18px;margin:0}header p{margin:5px 0 0;color:#bcd4df}main{padding:14px}.card{background:white;border:1px solid #e0e8eb;border-radius:9px;padding:13px;margin-bottom:12px}button{width:100%;border:0;background:#09643a;color:white;border-radius:7px;padding:11px;font-weight:600;margin-top:9px;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#e3edf2;color:#16445a}.danger{background:#8c392b}.muted{color:#607787;font-size:12px;line-height:1.5}.ok{color:#126b3f}.err{color:#a4262c}input{width:100%;padding:10px;border:1px solid #bfcdd5;border-radius:5px}pre{background:#eef2f5;padding:10px;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto;font-size:11px}.small{font-size:12px}label{display:block;margin:8px 0 4px}</style>
-</head><body><header><h1>Mostrans Price Tools</h1><p>POC 05.3 · Restored contiguous write-back + guarded staging execute</p></header><main>
+</head><body><header><h1>Mostrans Price Tools</h1><p>POC 05.4 · Write diagnostic + guarded write-back + guarded staging execute</p></header><main>
 <section class="card"><b>1. Baca data Excel</b><p class="muted">Sheet aktif, header baris 1. Maks. 1.000 row; kolom K opsional: [YYYY-MM-DD,YYYY-MM-DD] atau kosong (null).</p><button id="read" disabled>Baca A–K dan bentuk JSON</button><p id="read-status" class="muted">Menunggu Office.js...</p><pre id="preview">Belum dibaca.</pre></section>
 <section class="card"><b>2. Validasi via Flask (Staging)</b><p class="muted">Gunakan workbook dummy / data yang diizinkan. Quick Tunnel tidak memiliki autentikasi dan jangan digunakan untuk data produksi sensitif.</p><label for="api">Base HTTPS Flask</label><input id="api" placeholder="https://xxxxx.trycloudflare.com" type="url" spellcheck="false"><button id="health" class="secondary">Test Connection</button><button id="validate" disabled>Validasi A–K ke Flask (No SQL)</button><pre id="result">Belum ada hasil.</pre></section>
 <section class="card"><b>3. Write-back hasil validasi</b><p class="muted">Hanya menulis kolom <b>AF:AH</b>: POC Status, POC Error, POC Row ID. Tidak menghapus row dan tidak mengubah A–AE. Pastikan AF:AH kosong atau berisi hasil POC sebelumnya. Klik tombol untuk langsung menulis hasil validasi; tanpa popup konfirmasi.</p><button id="write" disabled>Tulis status validasi ke Excel (AF–AH)</button><p id="write-status" class="muted">Belum ada write-back.</p></section>
+<section class="card"><b>Diagnostic — Office.js write sederhana</b><p class="muted">Khusus SALINAN workbook testing. Akan menulis TEST_OK ke AI2, bukan A–K, Z–AD, atau AF–AH. Gunakan ketika write-back utama hanging, setelah reload workbook.</p><button id="diag-write" class="secondary">Test tulis 1 sel (AI2)</button><p id="diag-write-status" class="muted">Belum dijalankan.</p></section>
 <section class="card"><b>4. POC 04 — Lookup Master PostgreSQL (READ ONLY)</b>
 <p class="muted">Flask melakukan SELECT dari master data PostgreSQL: transporter, kota asal/tujuan, jenis kendaraan, tipe harga. Tidak ada UPDATE harga. Output ID ke Z:AD, status/error ke AF:AH. <b>Gunakan data dummy atau data staging yang diizinkan!</b></p>
 <label for="lookup-token">POC Lookup Token (staging only)</label><input id="lookup-token" type="password" autocomplete="off" placeholder="Token dari terminal Flask (tidak disimpan)"/><button id="lookup" disabled>Lookup ID Master via Flask (SELECT)</button>
@@ -290,6 +291,34 @@ async function writePriceResult(){
  }catch(e){setMessage('price-write-status','Write-back gagal: '+(e.message||String(e)),true)}
  finally{$('price-write').disabled=false}
 }
+
+async function diagnosticWriteSingleCell(){
+ const btn=$('diag-write');btn.disabled=true;
+ const start=Date.now();
+ let finished=false;
+ const watchdog=setTimeout(()=>{
+   if(!finished) setMessage('diag-write-status',`Tidak ada respons ctx.sync setelah ${Math.round((Date.now()-start)/1000)} detik. Refresh workbook sebelum mencoba ulang; cek Console pada frame add-in.`,true);
+ },15000);
+ try{
+   setMessage('diag-write-status','Memulai Excel.run; menulis TEST_OK ke AI2...');
+   console.info('[Mostrans POC05.4] before Excel.run');
+   await Excel.run(async ctx=>{
+     const sh=ctx.workbook.worksheets.getActiveWorksheet();
+     const cell=sh.getRange('AI2');
+     cell.values=[['TEST_OK']];
+     console.info('[Mostrans POC05.4] before ctx.sync for AI2');
+     setMessage('diag-write-status','Mengirim satu perubahan AI2 melalui ctx.sync()...');
+     await ctx.sync();
+     console.info('[Mostrans POC05.4] after ctx.sync for AI2');
+   });
+   setMessage('diag-write-status',`Berhasil menulis AI2 dalam ${Date.now()-start} ms. Cek sel AI2.`);
+ }catch(e){
+   console.error('[Mostrans POC05.4] diagnostic write failed',e);
+   setMessage('diag-write-status',`Diagnostik gagal: ${e.code||''} ${e.message||String(e)}`,true);
+ }finally{finished=true;clearTimeout(watchdog);btn.disabled=false;}
+}
+$('diag-write').addEventListener('click', diagnosticWriteSingleCell);
+
 $('price-preview').addEventListener('click',dryRunPrice);
 $('price-execute').addEventListener('click',executePrice);
 $('price-write').addEventListener('click',writePriceResult);

@@ -1,0 +1,6 @@
+{
+  "transporter": {"schema": "public", "table": "mt_master_transporter", "id_column": "id", "name_column": "nama_transporter"},
+  "kota": {"schema": "public", "table": "mt_master_kota", "id_column": "id", "name_column": "nama"},
+  "jenis_kendaraan": {"schema": "public", "table": "mt_master_jenis_kendaraan", "id_column": "id", "name_column": "jenis_kendaraan"},
+  "tipe_harga": {"schema": "public", "table": "mt_tipe_harga", "id_column": "id", "name_column": "nama"}
+}

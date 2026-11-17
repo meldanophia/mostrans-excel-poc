@@ -1,112 +1,51 @@
-# Mostrans Excel POC 04 — PostgreSQL Master Lookup (READ ONLY)
+# Mostrans POC 05 — Dry Run + Guarded UPDATE STAGING
 
-## Tujuan dan batas aman
+This package extends working POC 04 (Office Add-in A–K, PostgreSQL master SELECT, Z–AD / AF–AH write-back).
 
-- Menjaga fungsi POC03.2: Baca A–K, validasi tanpa database, write-back status AF–AH.
-- Tambah endpoint `POST /poc/master-lookup`: **hanya SELECT** ke PostgreSQL staging.
-- Cocokkan nama master dengan nilai exact (case-sensitive, trim kanan/kiri) seperti map Apps Script. Nama yang tidak ada atau ambigu dianggap gagal.
-- Tambah tombol Office Add-in untuk tulis hasil ID ke **Z:AD** dan status/error ke **AF:AH**.
-- **Tidak ada SQL UPDATE/INSERT/DELETE harga, tidak ada auto-hapus baris, tidak mengubah kolom AE.**
-- `valid_date` tetap VARCHAR, opsional, dikirim `null` jika kosong. Format input jika diisi `[YYYY-MM-DD,YYYY-MM-DD]`.
-- Add-in harus dibuka di **workbook POC / salinan**, karena Z:AD menjadi kolom output; jika berisi ID lama yang berbeda, penulisan otomatis dibatalkan.
+## CRITICAL: default remains read-only
 
-## 1. Ketahui nama tabel master PostgreSQL yang benar
+- `POST /poc/price-preview` performs PostgreSQL **SELECT only** and produces a signed preview proof valid for 10 minutes.
+- `POST /poc/price-execute` is **DISABLED by default**. It requires `POC_ENVIRONMENT=staging` **and** `ENABLE_PRICE_UPDATE=true`, plus a signed preview proof and typed confirmation `EXECUTE_STAGING`.
+- Do not enable Execute against production. Run with a dedicated staging DB, authorized staging credentials, and a workbook copy containing synthetic/non-sensitive rows. **Cloudflare Quick Tunnel is a public transport; the shared POC token is not production authentication.**
+- During execution, SQL is written by Flask; no SQL from Excel is accepted.
+- At most 50 rows per Execute request, synchronous. A durable per-row log and idempotency key prevent resubmitting the same job/row from applying the same UPDATE twice. This is not yet a production worker queue.
 
-Kode Apps Script awal membaca master dari spreadsheet lain, jadi nama tabel `jenis_kendaraan` dan `tipe_harga` pada PostgreSQL belum dapat dipastikan. Jangan menyalin nama tabel contoh tanpa memverifikasi.
+## Business behavior
 
-Jalankan query diagnosis berikut di database staging:
+Based on the original Apps Script UPDATE: `mt_harga_transporter`, filter `transporter_id`, `nomor_sk LIKE %...%`, `asal_id`, `tujuan_id`, `jenis_kendaraan_id`, `tipe_muatan`, `tipe_harga_id`, `start_date`; plus agreed optional `valid_date` VARCHAR, equality including NULL. Only records with `active='A'` are eligible (guard added in POC05). Target **must be exactly one active record**. `0` = NOT_FOUND, `>=2` = AMBIGUOUS, never bulk-update ambiguous matches. `Price` and `TKBM` are still validated in A–K but **not matched in UPDATE**, consistent with uploaded Apps Script; verify intended business rule.
 
-```sql
-SELECT table_schema, table_name, column_name, data_type
-FROM information_schema.columns
-WHERE table_schema = 'public'
-  AND (
-       table_name ILIKE '%transporter%'
-    OR table_name ILIKE '%kota%'
-    OR table_name ILIKE '%kendaraan%'
-    OR table_name ILIKE '%harga%'
-  )
-  AND (column_name = 'id' OR column_name ILIKE '%nama%' OR column_name ILIKE '%jenis%' OR column_name ILIKE '%tipe%')
-ORDER BY table_name, ordinal_position;
-```
+**Important**: `nomor_sk LIKE` is literal substring matching with `%` and `_` escaped. Review if exact equality is preferable. Ensure status column accepts integer `6` and the table uses `inactive_date` timestamp compatible with `NOW()`.
 
-Copy `master_lookup.example.json` menjadi `master_lookup.json`, lalu perbaiki nilai `schema`, `table`, `id_column`, `name_column` sesuai tabel sungguhan. Nama pada contoh transporter/kota adalah kandidat berdasarkan diskusi sebelumnya; **tetap verifikasi**. Jangan commit `master_lookup.json` ke repository publik bila memuat detail internal yang sensitif.
+## Setup
 
-## 2. Siapkan environment Windows
+1. Copy `web/taskpane.html` to your GitHub Pages repository (`main`), leaving hosting path and existing `manifest.xml` unchanged. Manifest already requires `ReadWriteDocument`.
+2. Copy `flask_poc_api.py`, `poc05_extension.py`, `poc05_sql.py` to your *local Flask directory*, keeping your private `.env`, `master_lookup.json` and `DATABASE_URL` locally. These should **never be committed to public GitHub**. `master_lookup.json` must contain your verified master mapping.
+3. `py -m pip install -r requirements.txt` (`python-dotenv` now required).
+4. Existing environment variables:
+   ```dotenv
+   DATABASE_URL=postgresql://READONLY_USER:***@STAGING_HOST:5432/STAGING_DB?sslmode=require
+   MASTER_LOOKUP_CONFIG=master_lookup.json
+   POC_LOOKUP_TOKEN=your-private-random-token-min-24-chars
+   POC_PREVIEW_SECRET=your-different-random-secret-min-32-chars
+   POC_ENVIRONMENT=staging
+   ENABLE_PRICE_UPDATE=false
+   # Only later for internal staging (never Quick Tunnel):
+   POC_EXECUTE_ALLOWED_HOST=staging-api.example.internal
+   ```
+   For preview, read-only SELECT permissions are sufficient. Secret values in this example are placeholders.
+5. Restart `py flask_poc_api.py` (port 6077) and keep Cloudflare Quick Tunnel running. In Excel Online, click **Baca A–K**, then **Dry Run Harga (SELECT Only)** using the same lookup token from POC04. Review READY / NOT_FOUND / AMBIGUOUS / INVALID.
+6. Only if explicitly approving a **staging** UPDATE test: create `poc_price_execution_log` on staging with `prepare_staging.sql`, grant appropriately scoped `INSERT/SELECT/UPDATE` on the log and `SELECT/UPDATE` on `mt_harga_transporter` to your test role (plus sequence rights). Deploy behind company authentication and internal HTTPS with `POC_EXECUTE_ALLOWED_HOST` matching the internal request host, change to `ENABLE_PRICE_UPDATE=true`, and restart Flask. **The public Quick Tunnel cannot execute UPDATE even when this flag is enabled.** Use copied workbook and a single known row first. Execute requires typed `EXECUTE_STAGING`; failed/missing rows are not updated. The update is row-by-row transactional and logged atomically per success. `Write-back Status Execute` writes AF–AH only; it **does not delete successful Excel rows**.
+7. After test, set `ENABLE_PRICE_UPDATE=false`, restart Flask, and revoke test UPDATE permissions if no longer needed.
 
-Buka terminal pada folder POC04:
+## Safety / retry
 
-```powershell
-py -m pip install -r requirements.txt
-$env:DATABASE_URL = 'postgresql://readonly_user:YOUR_PASSWORD@STAGING_HOST:5432/YOUR_DATABASE?sslmode=require'
-$env:MASTER_LOOKUP_CONFIG = 'master_lookup.json'
-$env:POC_LOOKUP_TOKEN = 'GANTI_DENGAN_TOKEN_ACAK_MINIMAL_24_KARAKTER'
-py flask_poc_api.py
-```
+- Never blindly retry using a new job key if the first request timed out: inspect `poc_price_execution_log` first. Re-run with same dry-run proof and the same in-memory `job_key` while the page remains open; results are reused.
+- Each confirmed row is rechecked against the current DB before UPDATE and updated only by the exact target ID; changed or ambiguous matches return STALE.
+- Row failures are logged, but no automatic database rollback of previously successful rows is performed: they are committed per row.
+- Excel write-back is NOT atomic with the DB transaction. An Excel failure should not trigger another UPDATE; retain the existing job key/log and reconcile. Production phase requires persistent job identifiers and recovery across browser closes.
+- Row IDs like `Sheet1:row-2` are position-based; stable UUIDs and immutable row hashes are needed before production, especially if users can insert/delete rows during jobs.
+- `POC_PREVIEW_SECRET` must be stable across Flask restarts during a preview; do not commit it. Never log passwords/tokens.
 
-**Command Prompt (CMD)** dapat menggunakan `set DATABASE_URL=...`, `set MASTER_LOOKUP_CONFIG=...`, dan `set POC_LOOKUP_TOKEN=...` (bukan `$env:`).
+## Note on environment permissions
 
-Gunakan akun PostgreSQL yang punya izin `CONNECT`, `USAGE` schema master, dan hanya `SELECT` untuk empat tabel master. Backend tambahan menjalankan `SET TRANSACTION READ ONLY` dan `statement_timeout` sebagai pertahanan tambahan. Jangan gunakan akun DBA atau akun production yang punya izin update.
-
-Contoh grant yang dikerjakan DBA sesuai nama tabel actual:
-
-```sql
--- Contoh saja; ganti nama tabel sesuai master_lookup.json
-GRANT CONNECT ON DATABASE nama_staging_db TO poc_master_reader;
-GRANT USAGE ON SCHEMA public TO poc_master_reader;
-GRANT SELECT ON public.mt_master_transporter, public.mt_master_kota TO poc_master_reader;
--- Tambahkan GRANT SELECT pada tabel jenis kendaraan dan tipe harga yang benar.
-```
-
-Contoh ini tidak membuat role; role harus disiapkan DBA. Untuk data sensitif jangan gunakan Quick Tunnel tanpa autentikasi organisasi. `POC_LOOKUP_TOKEN` adalah lapisan keamanan sementara, bukan pengganti Entra ID/OAuth2 atau gateway enterprise. Jangan commit token, .env, atau connection string ke GitHub.
-
-## 3. Hosting Excel Add-in
-
-Upload **hanya** `web/taskpane.html` yang baru ke repo GitHub Pages (folder `web`), lalu commit ke branch `main`. File HTML berisi JS Office.js. `manifest.xml` lama POC03 yang sudah memberi `ReadWriteDocument` dapat digunakan ulang jika hostname dan lokasinya tetap sama.
-
-`web/taskpane.html` URL tetap:
-
-`https://meldanophia.github.io/mostrans-excel-poc/web/taskpane.html`
-
-Jangan upload Flask, DATABASE_URL, atau file konfigurasi database ke GitHub Pages.
-
-## 4. Uji dari Excel Online
-
-1. Jalankan Flask port `6077`, lalu Cloudflare tunnel jika test dummy/staging diperbolehkan:
-
-   `cloudflared tunnel --url http://localhost:6077`
-
-2. Buka Excel POC dan add-in, isi URL sementara `.trycloudflare.com` yang baru.
-3. **Baca A–K dan bentuk JSON**.
-4. **Test Connection** untuk memastikan Flask versi 04.
-5. **Lookup ID Master via Flask (SELECT)**: masukkan `POC_LOOKUP_TOKEN` yang sama dengan environment Flask. Tunggu ringkasan JSON `resolved_rows` dan `failed_rows`.
-6. **Write-back ID Z:AD + Status AF:AH**: pada *salinan workbook POC*. Akan menolak penimpaan cell ID existing yang berbeda, menolak input yang telah berubah, dan mempertahankan AE.
-
-Mapping output:
-
-| Excel | Hasil |
-|---|---|
-| Z | transporter_id |
-| AA | asal_kota_id |
-| AB | tujuan_kota_id |
-| AC | jenis_kendaraan_id |
-| AD | tipe_harga_id |
-| AE | **tidak disentuh** |
-| AF | LOOKUP_OK / LOOKUP_FAILED |
-| AG | pesan error lookup/validasi |
-| AH | Row ID |
-
-**Tidak ada query UPDATE mt_harga_transporter pada tahap ini.** POC05 baru membahas eksekusi dengan audit job, idempotency, safe transaction, dan error row; bukan bagian dari POC04.
-
-## 5. Troubleshooting
-
-- HTTP 401: `POC_LOOKUP_TOKEN` belum sama antara Flask dan panel.
-- HTTP 503: `DATABASE_URL` hilang, `psycopg` belum diinstal, JSON mapping salah, koneksi gagal, nama tabel/kolom salah, atau `SELECT` belum diberikan. Baca log terminal Flask.
-- `master tidak ditemukan`: nilai label Excel tidak persis sama dengan nama master; mapping exact/case-sensitive sengaja dipertahankan.
-- `master ambigu`: beberapa ID punya nama persis sama, perlu aturan bisnis tambahan.
-- Write-back gagal karena Z:AD sudah terisi: gunakan salinan Excel kosong untuk POC; jangan menghapus ID production tanpa backup.
-- Valid date kosong `null` di JSON tidak menyebabkan lookup gagal.
-
-## Catatan pengamanan data
-
-Quick Tunnel bukan autentikasi jaringan. Walau endpoint lookup punya token sementara, hindari mengirim data harga/kredensial production melalui tunnel publik. Gunakan lingkungan staging, data dummy yang diizinkan, dan nantinya Entra ID, otorisasi user, TLS, rate limiting, serta reverse proxy internal.
+A staging user cannot both be strictly SELECT-only and execute UPDATE. Keep preview read-only with dedicated credentials. When enabling staging Execute, use a different, tightly scoped test role. Under no circumstance set an UPDATE-enabled credential on an endpoint exposed via an unauthenticated Cloudflare Quick Tunnel in a real organization; use Entra ID auth and a corporate staging endpoint first.

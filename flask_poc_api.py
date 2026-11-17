@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from flask import Flask, jsonify, request
+from poc05_extension import register_poc05
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -58,7 +59,7 @@ def health():
 def parsed_request():
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or data.get('operation') not in (
-        'POC_VALIDATE_INACTIVE_PRICE_NO_SQL','POC_LOOKUP_INACTIVE_PRICE_READ_ONLY'):
+        'POC_VALIDATE_INACTIVE_PRICE_NO_SQL','POC_LOOKUP_INACTIVE_PRICE_READ_ONLY','POC_PRICE_DRY_RUN','POC_PRICE_EXECUTE'):
         raise ValueError('Operation POC tidak sesuai')
     rows = data.get('rows')
     if not isinstance(rows, list) or not 1 <= len(rows) <= 1000:
@@ -224,6 +225,10 @@ def master_lookup():
     return jsonify(status='lookup_completed',database_used=True,db_writes_enabled=False,
                    total_rows=len(results),resolved_rows=sum(x['status']=='resolved' for x in results),
                    failed_rows=sum(x['status']=='lookup_failed' for x in results),results=results)
+
+register_poc05(app, {'validate_row':validate_row,'read_mapping':read_mapping,
+    'load_master_maps':load_master_maps,'LOOKUPS':LOOKUPS,
+    'psycopg':psycopg,'parsed_request':parsed_request})
 
 if __name__=='__main__':
     config_path = Path(os.getenv('MASTER_LOOKUP_CONFIG', 'master_lookup.json').strip())

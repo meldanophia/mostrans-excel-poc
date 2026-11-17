@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mostrans Price Tools POC 05.2</title>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mostrans Price Tools POC 05.3</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 <style>*{box-sizing:border-box}body{font:13px Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#153044;margin:0}header{background:#10334b;color:white;padding:17px}h1{font-size:18px;margin:0}header p{margin:5px 0 0;color:#bcd4df}main{padding:14px}.card{background:white;border:1px solid #e0e8eb;border-radius:9px;padding:13px;margin-bottom:12px}button{width:100%;border:0;background:#09643a;color:white;border-radius:7px;padding:11px;font-weight:600;margin-top:9px;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#e3edf2;color:#16445a}.danger{background:#8c392b}.muted{color:#607787;font-size:12px;line-height:1.5}.ok{color:#126b3f}.err{color:#a4262c}input{width:100%;padding:10px;border:1px solid #bfcdd5;border-radius:5px}pre{background:#eef2f5;padding:10px;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto;font-size:11px}.small{font-size:12px}label{display:block;margin:8px 0 4px}</style>
-</head><body><header><h1>Mostrans Price Tools</h1><p>POC 05.2 · Simplified write-back + guarded staging execute</p></header><main>
+</head><body><header><h1>Mostrans Price Tools</h1><p>POC 05.3 · Restored contiguous write-back + guarded staging execute</p></header><main>
 <section class="card"><b>1. Baca data Excel</b><p class="muted">Sheet aktif, header baris 1. Maks. 1.000 row; kolom K opsional: [YYYY-MM-DD,YYYY-MM-DD] atau kosong (null).</p><button id="read" disabled>Baca A–K dan bentuk JSON</button><p id="read-status" class="muted">Menunggu Office.js...</p><pre id="preview">Belum dibaca.</pre></section>
 <section class="card"><b>2. Validasi via Flask (Staging)</b><p class="muted">Gunakan workbook dummy / data yang diizinkan. Quick Tunnel tidak memiliki autentikasi dan jangan digunakan untuk data produksi sensitif.</p><label for="api">Base HTTPS Flask</label><input id="api" placeholder="https://xxxxx.trycloudflare.com" type="url" spellcheck="false"><button id="health" class="secondary">Test Connection</button><button id="validate" disabled>Validasi A–K ke Flask (No SQL)</button><pre id="result">Belum ada hasil.</pre></section>
 <section class="card"><b>3. Write-back hasil validasi</b><p class="muted">Hanya menulis kolom <b>AF:AH</b>: POC Status, POC Error, POC Row ID. Tidak menghapus row dan tidak mengubah A–AE. Pastikan AF:AH kosong atau berisi hasil POC sebelumnya. Klik tombol untuk langsung menulis hasil validasi; tanpa popup konfirmasi.</p><button id="write" disabled>Tulis status validasi ke Excel (AF–AH)</button><p id="write-status" class="muted">Belum ada write-back.</p></section>
@@ -97,59 +97,61 @@ async function performValidation(){
  }catch(e){validation=null;$('write').disabled=true;$('result').textContent='ERROR: '+(e.message||String(e))}
  finally{$('validate').disabled=false}
 }
-// POC 05.2: Explicit narrow output writes, one Office.js synchronization.
-// Do not query/read output header cells: that preflight read stalled in Excel Online.
-// IMPORTANT: Only use on a POC copy with Z:AD and AF:AH reserved for this tool.
+// POC 05.3: Restore POC 03.2 style: read contiguous output block, modify in memory,
+// then commit the entire output block. No per-row range writes in the same context.
 function valuesEqual(a,b){return String(a??'')===String(b??'')}
 async function checkCurrentInput(){
  if(!snapshot)throw Error('Baca ulang Excel dahulu');
  await Excel.run(async ctx=>{
   const sh=ctx.workbook.worksheets.getItem(snapshot.sheet);
   const r=sh.getRange(`A1:K${snapshot.rawRows.length}`);
-  r.load('text');await ctx.sync();
+  r.load('text'); await ctx.sync();
   for(const row of snapshot.rows){
    const i=row.sheet_row-1,now=r.text[i],before=snapshot.rawRows[i];
    if(now.some((v,k)=>String(v??'').trim()!==String(before[k]??'').trim()))
-    throw Error(`Input row ${row.sheet_row} berubah; Baca A–K kembali.`);
+     throw Error(`Input row ${row.sheet_row} berubah; Baca A–K kembali.`);
   }
  });
 }
-async function ensurePocHeaders(statusId,areas){
- // Header will be written with data in the same Excel.run call; no preflight sync.
- setMessage(statusId,'Header dan payload output siap (tanpa read-back header).');
- window.pocPendingHeaders=areas;
+function checkHeader(actual, expected, area){
+ for(let i=0;i<expected.length;i++){
+  const text=String(actual[i]??'').trim();
+  if(text!=='' && text!==expected[i]) throw Error(`Header ${area} tidak sesuai: ${text}`);
+ }
 }
-async function writeChunked(statusId,records,unused,makeWrites){
- const sorted=[...records].sort((a,b)=>a.sheet_row-b.sheet_row);
- const writes=makeWrites(sorted);
- const headers=window.pocPendingHeaders||[];
- window.pocPendingHeaders=null;
- setMessage(statusId,`Mengirim ${writes.length} range data + ${headers.length} header dalam satu sync Office.js…`);
- await Excel.run(async ctx=>{
-  const sh=ctx.workbook.worksheets.getItem(snapshot.sheet);
-  for(const h of headers){sh.getRange(h.address).values=[h.headers];}
-  for(const write of writes){sh.getRange(write.address).values=[write.values];}
-  await ctx.sync();
- });
- setMessage(statusId,`Office.js sync selesai: ${sorted.length} row. Data belum diverifikasi ulang.`);
+function checkStatusOwnership(existing, rowId, n){
+ if(existing.some(v=>String(v??'').trim()!=='')){
+  if(String(existing[2]??'')!==rowId) throw Error(`AF:AH row ${n} milik data lain. Hentikan penulisan.`);
+ }
 }
 async function writeBack(){
- if(!snapshot||!validation){setMessage('write-status','Baca dan validasi A–K dahulu.',true);return}
+ if(!snapshot||!validation){setMessage('write-status','Baca A–K dan validasi via Flask dahulu.',true);return}
  $('write').disabled=true;
  try{
-  setMessage('write-status','Tahap 1/3 — memeriksa apakah A–K berubah…');
+  setMessage('write-status','Tahap 1/3: Memeriksa apakah A–K berubah…');
   await checkCurrentInput();
-  await ensurePocHeaders('write-status',[{address:'AF1:AH1',headers:['POC Status','POC Error','POC Row ID']}]);
-  const byId=new Map(validation.results.map(x=>[x.row_id,x]));
-  const records=snapshot.rows.map(row=>({...row,result:byId.get(row.row_id)}));
-  if(records.some(r=>!r.result))throw Error('Response validasi tidak lengkap.');
-  await writeChunked('write-status',records,null,part=>part.map(row=>({
-   address:`AF${row.sheet_row}:AH${row.sheet_row}`,
-   values:[row.result.status==='valid'?'VALID_POC':'FAILED_VALIDATION',row.result.error_message||'',row.row_id],
-   check:(existing)=>checkManagedStatus(existing,null,row.row_id,row.sheet_row)
-  })));
-  setMessage('write-status',`Berhasil menulis & verifikasi ${records.length} row ke AF:AH. SQL TIDAK dieksekusi.`);
- }catch(e){setMessage('write-status',`Gagal/tertahan pada tahap terakhir: ${e.message||String(e)}. Batch yang selesai boleh sudah tersimpan; klik ulang untuk melanjutkan.`,true);console.error('write-back diagnostic',e)}
+  const byId=new Map(validation.results.map(r=>[r.row_id,r]));
+  setMessage('write-status','Tahap 2/3: Membaca blok AF–AH…');
+  const written=await Excel.run(async ctx=>{
+   const sh=ctx.workbook.worksheets.getItem(snapshot.sheet);
+   const out=sh.getRange(`AF1:AH${snapshot.rawRows.length}`);
+   out.load('values'); await ctx.sync();
+   const current=out.values;
+   checkHeader(current[0],['POC Status','POC Error','POC Row ID'],'AF–AH');
+   const updated=current.map(row=>[...row]);
+   updated[0]=['POC Status','POC Error','POC Row ID'];
+   for(const row of snapshot.rows){
+    const r=byId.get(row.row_id);if(!r)throw Error(`Result ${row.row_id} tidak ditemukan`);
+    checkStatusOwnership(current[row.sheet_row-1],row.row_id,row.sheet_row);
+    updated[row.sheet_row-1]=[r.status==='valid'?'VALID_POC':'FAILED_VALIDATION',r.error_message||'',row.row_id];
+   }
+   setMessage('write-status',`Tahap 3/3: Menyimpan satu blok AF–AH (${snapshot.rows.length} row)…`);
+   out.values=updated;
+   await ctx.sync();
+   return snapshot.rows.length;
+  });
+  setMessage('write-status',`Berhasil menulis ${written} row ke AF–AH. SQL TIDAK dieksekusi.`);
+ }catch(e){setMessage('write-status','Write-back gagal: '+(e.message||String(e)),true);console.error('[Mostrans] write validation failed',e)}
  finally{$('write').disabled=false}
 }
 
@@ -175,31 +177,40 @@ async function writeLookup(){
  $('lookup-write').disabled=true;
  try{
   if(!snapshot||!lookupResults)throw Error('Lookup dahulu.');
-  setMessage('lookup-write-status','Tahap 1/3 — memeriksa perubahan A–K…');
+  setMessage('lookup-write-status','Tahap 1/3: Memeriksa apakah A–K berubah…');
   await checkCurrentInput();
-  await ensurePocHeaders('lookup-write-status',[
-    {address:'Z1:AD1',headers:['POC Transporter ID','POC Asal Kota ID','POC Tujuan Kota ID','POC Jenis Kendaraan ID','POC Tipe Harga ID']},
-    {address:'AF1:AH1',headers:['POC Status','POC Error','POC Row ID']}
-  ]);
-  const byId=new Map(lookupResults.results.map(x=>[x.row_id,x]));
-  const records=snapshot.rows.map(row=>({...row,result:byId.get(row.row_id)}));
-  if(records.some(r=>!r.result||!r.result.ids))throw Error('Response master lookup tidak lengkap.');
+  const byId=new Map(lookupResults.results.map(r=>[r.row_id,r]));
   const keys=['transporter_id','asal_kota_id','tujuan_kota_id','jenis_kendaraan_id','tipe_harga_id'];
-  await writeChunked('lookup-write-status',records,null,part=>part.flatMap(row=>{
-    const idValues=keys.map(k=>row.result.ids[k]??'');
-    return [
-      {address:`Z${row.sheet_row}:AD${row.sheet_row}`,values:idValues,
-       check:existing=>{
-         for(let i=0;i<5;i++)if(String(existing[i]??'').trim()!==''&&!valuesEqual(existing[i],idValues[i]))
-           throw Error(`Z:AD row ${row.sheet_row} sudah memiliki ID berbeda.`);
-       }},
-      {address:`AF${row.sheet_row}:AH${row.sheet_row}`,
-       values:[row.result.status==='resolved'?'LOOKUP_OK':'LOOKUP_FAILED',row.result.error_message||'',row.row_id],
-       check:existing=>checkManagedStatus(existing,null,row.row_id,row.sheet_row)}
-    ];
-  }));
-  setMessage('lookup-write-status',`Berhasil write-back & verifikasi ${records.length} row. PostgreSQL SELECT ONLY.`);
- }catch(e){setMessage('lookup-write-status',`Write-back gagal: ${e.message||String(e)}. Sebagian batch dapat sudah tersimpan; aman dicoba ulang jika data tidak diubah.`,true);console.error('lookup write-back diagnostic',e)}
+  setMessage('lookup-write-status','Tahap 2/3: Membaca blok Z–AD dan AF–AH…');
+  const written=await Excel.run(async ctx=>{
+   const sh=ctx.workbook.worksheets.getItem(snapshot.sheet);
+   const count=snapshot.rawRows.length;
+   const idsRange=sh.getRange(`Z1:AD${count}`);
+   const statusRange=sh.getRange(`AF1:AH${count}`);
+   idsRange.load('values');statusRange.load('values');await ctx.sync();
+   const idCurrent=idsRange.values, statusCurrent=statusRange.values;
+   const idHeaders=['POC Transporter ID','POC Asal Kota ID','POC Tujuan Kota ID','POC Jenis Kendaraan ID','POC Tipe Harga ID'];
+   const statusHeaders=['POC Status','POC Error','POC Row ID'];
+   checkHeader(idCurrent[0],idHeaders,'Z–AD');checkHeader(statusCurrent[0],statusHeaders,'AF–AH');
+   const idsUpdated=idCurrent.map(r=>[...r]),statusesUpdated=statusCurrent.map(r=>[...r]);
+   idsUpdated[0]=idHeaders;statusesUpdated[0]=statusHeaders;
+   for(const row of snapshot.rows){
+     const result=byId.get(row.row_id);if(!result||!result.ids)throw Error(`Lookup ${row.row_id} hilang`);
+     const proposed=keys.map(k=>result.ids[k]??'');
+     const old=idCurrent[row.sheet_row-1];
+     for(let i=0;i<5;i++)if(String(old[i]??'').trim()!=='' && !valuesEqual(old[i],proposed[i]))
+        throw Error(`Z–AD row ${row.sheet_row} memiliki ID berbeda`);
+     checkStatusOwnership(statusCurrent[row.sheet_row-1],row.row_id,row.sheet_row);
+     idsUpdated[row.sheet_row-1]=proposed;
+     statusesUpdated[row.sheet_row-1]=[result.status==='resolved'?'LOOKUP_OK':'LOOKUP_FAILED',result.error_message||'',row.row_id];
+   }
+   setMessage('lookup-write-status',`Tahap 3/3: Menyimpan dua blok output untuk ${snapshot.rows.length} row…`);
+   idsRange.values=idsUpdated; statusRange.values=statusesUpdated;
+   await ctx.sync();
+   return snapshot.rows.length;
+  });
+  setMessage('lookup-write-status',`Berhasil menulis ${written} row ke Z–AD dan AF–AH. PostgreSQL SELECT ONLY.`);
+ }catch(e){setMessage('lookup-write-status','Write-back gagal: '+(e.message||String(e)),true);console.error('[Mostrans] write lookup failed',e)}
  finally{$('lookup-write').disabled=false}
 }
 

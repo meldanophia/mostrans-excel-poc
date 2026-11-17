@@ -11,6 +11,10 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from flask import Flask, jsonify, request
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / '.env')
 
 try:
     import psycopg
@@ -126,9 +130,12 @@ def validate():
 
 
 def read_mapping():
-    filepath=Path(os.getenv('MASTER_LOOKUP_CONFIG','master_lookup.json'))
-    if not filepath.is_absolute(): filepath=Path(__file__).resolve().parent / filepath
-    config=json.loads(filepath.read_text(encoding='utf-8'))
+    filepath=Path(os.getenv('MASTER_LOOKUP_CONFIG', 'master_lookup.json').strip())
+    if not filepath.is_absolute():
+        filepath=BASE_DIR / filepath
+    config=json.loads(filepath.read_text(encoding='utf-8-sig'))
+    if not isinstance(config, dict):
+        raise ValueError('root konfigurasi master lookup harus JSON object')
     for name in ('transporter','kota','jenis_kendaraan','tipe_harga'):
         entry=config.get(name)
         if not isinstance(entry,dict): raise ValueError(f'mapping {name} belum diisi')
@@ -219,4 +226,14 @@ def master_lookup():
                    failed_rows=sum(x['status']=='lookup_failed' for x in results),results=results)
 
 if __name__=='__main__':
-    app.run(host='127.0.0.1',port=int(os.getenv('PORT','6077')),debug=False)
+    config_path = Path(os.getenv('MASTER_LOOKUP_CONFIG', 'master_lookup.json').strip())
+    if not config_path.is_absolute():
+        config_path = BASE_DIR / config_path
+    print('[POC04] .env path:', BASE_DIR / '.env')
+    print('[POC04] .env exists:', (BASE_DIR / '.env').is_file())
+    print('[POC04] master config path:', config_path)
+    print('[POC04] master config exists:', config_path.is_file())
+    print('[POC04] DATABASE_URL configured:', bool(os.getenv('DATABASE_URL')))
+    print('[POC04] POC_LOOKUP_TOKEN configured:', len(os.getenv('POC_LOOKUP_TOKEN', '')) >= 24)
+    app.run(host='127.0.0.1', port=int(os.getenv('PORT', '6077')), debug=False)
+

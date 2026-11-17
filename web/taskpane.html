@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mostrans Price Tools — POC</title>
+  <script src="https://officeapis.public.onecdn.static.microsoft/1/office.js"></script>
+  <style>
+    *{box-sizing:border-box}body{font-family:Segoe UI,Arial,sans-serif;margin:0;color:#182b39;background:#f6f8fa}
+    header{background:#10334b;color:white;padding:17px}header h1{font-size:18px;margin:0}header p{margin:5px 0 0;font-size:12px;color:#cbdce5}
+    main{padding:15px} .card{background:white;border:1px solid #e1e6eb;border-radius:10px;padding:14px;margin-bottom:12px}
+    button{border:0;border-radius:7px;padding:11px 14px;font-weight:600;cursor:pointer;background:#12643d;color:white;width:100%}
+    button:disabled{background:#9ca9b2;cursor:not-allowed}.secondary{background:#e6eff5;color:#174a66;margin-top:8px}
+    #status{font-size:13px;line-height:1.55;overflow-wrap:anywhere}.muted{font-size:12px;color:#657888}.ok{color:#17653b}.error{color:#af2525}
+    .scroll{max-height:280px;overflow:auto;border:1px solid #e3e7eb;border-radius:6px}table{border-collapse:collapse;font-size:11px;width:100%}
+    th,td{border-bottom:1px solid #edf0f2;padding:7px;min-width:90px;max-width:210px;overflow-wrap:anywhere;text-align:left}
+    th{background:#edf3f6;position:sticky;top:0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f4f6;padding:10px;border-radius:6px;font-size:11px;max-height:160px;overflow-y:auto}
+  </style>
+</head>
+<body>
+  <header><h1>Mostrans Price Tools</h1><p>POC 01 · Read Excel Data · Read-only</p></header>
+  <main>
+    <section class="card"><b>Excel Connection</b><p id="status">Menghubungkan ke Excel...</p>
+      <button id="read" disabled>Baca Kolom A–J</button>
+      <button id="copy" class="secondary" disabled>Copy JSON</button>
+    </section>
+    <section class="card"><b>Ringkasan</b><p id="summary" class="muted">Belum ada data dibaca.</p></section>
+    <section class="card"><b>Preview data (maks. 10 row)</b><div id="preview" class="scroll muted">Klik Baca Kolom A–J.</div></section>
+    <section class="card"><b>JSON result</b><p class="muted">Preview maksimal 5 baris agar mudah diperiksa. Tombol Copy JSON menyalin seluruh data yang dibaca.</p><pre id="json">{}</pre></section>
+    <p class="muted">Keamanan: POC hanya membaca workbook aktif. Tidak ada request ke Flask, SQL, atau database. Jangan gunakan data production pada hosting publik.</p>
+  </main>
+<script>
+  let payload = null;
+  const $ = (id) => document.getElementById(id);
+  function status(message, css='') { $('status').textContent=message; $('status').className=css; }
+  function displayTable(headers,rows) {
+    const target=$('preview');target.replaceChildren();
+    if(!rows.length){target.textContent='Tidak ada baris data.';return;}
+    const table=document.createElement('table'),thead=document.createElement('thead'),tr=document.createElement('tr');
+    for(const value of headers){const th=document.createElement('th');th.textContent=value;tr.appendChild(th);}thead.appendChild(tr);table.appendChild(thead);
+    const tbody=document.createElement('tbody');
+    for(const row of rows.slice(0,10)){const tr=document.createElement('tr');for(const value of row){const td=document.createElement('td');td.textContent=value;tr.appendChild(td);}tbody.appendChild(tr);}
+    table.appendChild(tbody);target.appendChild(table);
+  }
+  async function readExcel(){
+    $('read').disabled=true;status('Membaca workbook...');
+    try {
+      const data=await Excel.run(async context => {
+        const sheet=context.workbook.worksheets.getActiveWorksheet();
+        const used=sheet.getUsedRangeOrNullObject();
+        sheet.load('name');used.load(['isNullObject','address','rowIndex','rowCount']);await context.sync();
+        if(used.isNullObject)return {sheet:sheet.name,headers:[],rows:[],range:'kosong'};
+        // Header berada di baris 1, data dimulai baris 2. Hanya A:J dibaca.
+        const lastRow=Math.min(used.rowIndex+used.rowCount,1001);
+        const range=sheet.getRange(`A1:J${lastRow}`);range.load(['text','address']);await context.sync();
+        const cells=range.text;
+        const headers=cells[0].map((v,i)=>v||`Kolom ${i+1}`);
+        const rows=cells.slice(1).filter(r=>r.some(cell=>String(cell).trim()!==''));
+        return {sheet:sheet.name,range:range.address,headers,rows,read_limit:1000};
+      });
+      payload={sheet:data.sheet,source_range:data.range,total_rows:data.rows.length,columns:data.headers,rows:data.rows};
+      $('summary').textContent=`Sheet: ${data.sheet} | Range: ${data.range} | Data: ${data.rows.length} baris | 10 kolom`;
+      displayTable(data.headers,data.rows);
+      $('json').textContent=JSON.stringify({...payload,rows:payload.rows.slice(0,5)},null,2);
+      $('copy').disabled=false;status('Berhasil membaca data. Workbook tidak diubah.','ok');
+    }catch(err){status(`Gagal membaca Excel: ${err?.message||String(err)}`,'error');$('json').textContent=String(err);}
+    finally{$('read').disabled=false;}
+  }
+  $('read').addEventListener('click',readExcel);
+  $('copy').addEventListener('click',async()=>{
+    if(!payload)return;
+    try{await navigator.clipboard.writeText(JSON.stringify(payload,null,2));status('Seluruh JSON berhasil disalin.','ok');}
+    catch(err){status('Clipboard diblokir browser. Gunakan preview JSON untuk inspeksi.','error');}
+  });
+  Office.onReady(info=>{
+    if(info.host===Office.HostType.Excel){status('Terhubung ke Excel Online. Siap membaca worksheet aktif.','ok');$('read').disabled=false;}
+    else status('Buka add-in ini melalui Excel Online agar Office.js tersedia.','error');
+  });
+</script>
+</body>
+</html>

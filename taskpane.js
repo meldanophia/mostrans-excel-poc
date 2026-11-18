@@ -1,0 +1,83 @@
+
+'use strict';
+const FIELDS=['nomor_sk','transporter','asal_kota','tujuan_kota','jenis_kendaraan','tipe_muatan','tipe_harga','start_date','price','tkbm','valid_date'];
+const HEADERS=['no SK','Transporter','Asal Kota','Tujuan Kota','Jenis Kendaraan','Tipe Muatan','Tipe Harga','Start Date','Price','TKBM','Valid Date'];
+const META='_MOSTRANS_META';
+const el=id=>document.getElementById(id);
+let state={office:false, busy:false, preview:null, rows:null, workbookId:null, sheetName:null, jobId:null, requestKey:null};
+function note(text,bad=false){el('status').textContent=text;el('status').className=bad?'bad':'muted'; log(text);}
+function log(msg){const s=`${new Date().toLocaleTimeString('id-ID')} ${msg}`;el('log').textContent=s+'\n'+el('log').textContent.slice(0,5000);}
+function busy(value){state.busy=value;el('preview').disabled=value||!state.office;el('execute').disabled=value||!state.preview||Number(state.preview.ready_rows)<1||Boolean(state.jobId);el('recover').disabled=value||!state.office;}
+function numeric(v,t){if(typeof v==='number')return v;const s=String(t??v??'').trim();if(!s)return null;let q=s.replace(/\s/g,'');if(/^\d{1,3}(,\d{3})+$/.test(q))q=q.replace(/,/g,'');else if(/^\d{1,3}(\.\d{3})+$/.test(q))q=q.replace(/\./g,'');return /^\d+(\.\d+)?$/.test(q)?Number(q):null;}
+function isoDate(v,t){if(typeof v==='number'&&v>1&&v<100000)return new Date(Math.round((v-25569)*86400000)).toISOString().slice(0,10);const s=String(t??v??'').trim();if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;const m=s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);return m?`${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`:s;}
+function normalize(values,text,rowId,rowNo){const row={row_id:rowId,sheet_row:rowNo};for(let c=0;c<11;c++){const v=values[c],t=String(text[c]??'').trim();row[FIELDS[c]]=c===7?isoDate(v,t):c===8||c===9?numeric(v,t):c===10?(t||null):t;}return row;}
+function comparable(r){const o={};for(const key of FIELDS)o[key]=r[key]??null;return o;}
+function eqInput(a,b){return JSON.stringify(comparable(a))===JSON.stringify(comparable(b));}
+function baseUrl(){const u=new URL(el('base').value.trim());if(u.protocol!=='https:'||u.username||u.password||u.pathname!=='/'||u.search||u.hash)throw Error('API harus URL HTTPS origin tanpa path atau query');return u.origin;}
+async function api(method,path,payload=null,headers={}){const ctl=new AbortController();const timeout=setTimeout(()=>ctl.abort(),35000);try{const r=await fetch(baseUrl()+path,{method,signal:ctl.signal,cache:'no-store',headers:{Authorization:`Bearer ${el('token').value.trim()}`,...(payload?{'Content-Type':'application/json'}:{}),...headers},...(payload?{body:JSON.stringify(payload)}:{})});const body=await r.text();let data;try{data=JSON.parse(body)}catch{throw Error(`HTTP ${r.status}: response bukan JSON`)}if(!r.ok)throw Error(`HTTP ${r.status}: ${data.error||JSON.stringify(data)}`);return data;}finally{clearTimeout(timeout);}}
+function uuid(){return crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const n=Math.floor(Math.random()*16);return(c==='x'?n:(n&3|8)).toString(16)});}
+function sheetNameOK(n){return n&&n!==META;}
+async function workbookMeta(){return Excel.run(async ctx=>{const s=ctx.workbook.worksheets.getItemOrNullObject(META);s.load('isNullObject');await ctx.sync();if(s.isNullObject)return null;const r=s.getRange('A1:B6');r.load('values');await ctx.sync();const m=Object.fromEntries(r.values.filter(x=>String(x[0]||'').trim()).map(x=>[String(x[0]),String(x[1]||'')]));return m;});}
+async function saveMeta(entries){await Excel.run(async ctx=>{let s=ctx.workbook.worksheets.getItemOrNullObject(META);s.load('isNullObject');await ctx.sync();if(s.isNullObject)s=ctx.workbook.worksheets.add(META);const a=['workbook_id','sheet_name','job_id','request_key','stage','version'];for(let i=0;i<a.length;i++)if(entries[a[i]]!==undefined)s.getRange(`A${i+1}:B${i+1}`).values=[[a[i],String(entries[a[i]])]];s.visibility=Excel.SheetVisibility.hidden;await ctx.sync();});}
+async function saveSnapshots(rows){
+  await Excel.run(async ctx=>{
+    const sh=ctx.workbook.worksheets.getItem(META);
+    sh.getRange('A9:B1008').clear(Excel.ClearApplyTo.contents);
+    for(let offset=0;offset<rows.length;offset+=100){
+      const block=rows.slice(offset,offset+100).map(r=>[r.row_id,JSON.stringify(r)]);
+      sh.getRange(`A${9+offset}:B${8+offset+block.length}`).values=block;
+    }
+    await ctx.sync();
+  });
+}
+async function loadSnapshots(){
+  return Excel.run(async ctx=>{
+    const sh=ctx.workbook.worksheets.getItemOrNullObject(META);
+    sh.load('isNullObject'); await ctx.sync();
+    if(sh.isNullObject)return [];
+    const r=sh.getRange('A9:B1008');r.load('values');await ctx.sync();
+    const rows=[];
+    for(const [id,json] of r.values){if(!id||!json)continue;
+      const value=JSON.parse(String(json));
+      if(value.row_id!==String(id))throw Error('Snapshot metadata tidak konsisten');
+      rows.push(value);
+    }
+    return rows;
+  });
+}
+async function readWorkbook(createIds=false, chosenSheet=null, allowEmpty=false){return Excel.run(async ctx=>{const sheet=chosenSheet?ctx.workbook.worksheets.getItem(chosenSheet):ctx.workbook.worksheets.getActiveWorksheet();sheet.load('name');const used=sheet.getUsedRangeOrNullObject();used.load(['isNullObject','rowIndex','rowCount']);await ctx.sync();if(!sheetNameOK(sheet.name))throw Error('Pilih worksheet harga, bukan sheet metadata');if(used.isNullObject)throw Error('Worksheet kosong');const last=used.rowIndex+used.rowCount;if(last>1001)throw Error('Maksimal 1.000 row; ada data/format hingga row '+last);if(last<2&&allowEmpty)return {rows:[],sheetName:sheet.name};if(last<2)throw Error('Tidak ada row data');const r=sheet.getRange(`A1:AH${last}`);r.load(['values','text']);await ctx.sync();const h=r.text[0].slice(0,11).map(v=>String(v??'').trim().toLowerCase());if(HEADERS.some((x,i)=>x.toLowerCase()!==h[i]))throw Error('Header A–K tidak sesuai template: '+HEADERS.join(', '));const ids=new Set();const newIds=[];const rows=[];let changed=false;for(let i=1;i<r.values.length;i++){const val=r.values[i],tx=r.text[i];if(!tx.slice(0,11).some(v=>String(v??'').trim())){newIds.push([val[33]??'']);continue;}let id=String(tx[33]??'').trim();if(createIds&&(!id||/^.+:row-\d+$/.test(id))){id=uuid();changed=true;}if(!id)throw Error(`Row ${i+1} tidak punya row_id di AH; lakukan Preview dulu`);if(ids.has(id))throw Error(`Duplicate Row ID AH: ${id}`);ids.add(id);newIds.push([id]);rows.push(normalize(val.slice(0,11),tx.slice(0,11),id,i+1));}
+if(!rows.length&&!allowEmpty)throw Error('Tidak ada data input A–K');if(createIds&&changed){sheet.getRange(`AH2:AH${last}`).values=newIds;await ctx.sync();}return {rows,sheetName:sheet.name};});}
+async function doPreview(){busy(true);try{state.preview=null;state.rows=null;let meta=await workbookMeta();if(meta?.job_id||meta?.request_key){state.jobId=meta.job_id||null;state.requestKey=meta.request_key;el('job-ref').textContent=`Job ID: ${state.jobId}`;throw Error('Ada job sebelumnya pada workbook. Gunakan Resume Job & Excel Sync dulu; jangan preview job baru.');}
+const book=await readWorkbook(true);state.workbookId=meta?.workbook_id||uuid();state.sheetName=book.sheetName;state.rows=book.rows;await saveMeta({workbook_id:state.workbookId,sheet_name:book.sheetName,version:'phase2'});note(`Memvalidasi ${book.rows.length} row terhadap PostgreSQL (SELECT)...`);const p=await api('POST','/api/v1/transporter-prices/preview',{workbook_id:state.workbookId,rows:book.rows});state.preview=p;el('total').textContent=p.total_rows;el('ready').textContent=p.ready_rows;el('blocked').textContent=p.blocked_rows;const issues=(p.results||[]).filter(x=>x.status!=='ready');el('preview-details').textContent=issues.length?issues.slice(0,20).map(x=>`${x.row_id}: ${x.status} — ${x.error_message||'-'}`).join('\n'):'Semua row READY.';el('preview-details').style.whiteSpace='pre-wrap';note(`${p.ready_rows} READY, ${p.blocked_rows} non-READY. Review hasil sebelum Execute.`);
+}catch(e){note('Preview gagal: '+e.message,true);}finally{busy(false);}}
+async function findJobByKey(){const q=`?workbook_id=${encodeURIComponent(state.workbookId)}&request_key=${encodeURIComponent(state.requestKey)}`;return api('GET','/api/v1/transporter-prices/jobs/by-request-key'+q);}
+async function doExecute(){if(!state.preview||state.busy)return;busy(true);try{const meta=await workbookMeta();if(meta?.job_id||meta?.request_key)throw Error('Ada request/job tersimpan. Gunakan Resume dulu');const current=await readWorkbook(false,state.sheetName);if(current.rows.length!==state.rows.length||current.rows.some((r,i)=>r.row_id!==state.rows[i].row_id||r.sheet_row!==state.rows[i].sheet_row||!eqInput(r,state.rows[i])))throw Error('Data Excel berubah setelah Preview. Preview ulang diperlukan.');
+const base=baseUrl();if(base.endsWith('.trycloudflare.com'))throw Error('Quick Tunnel tidak boleh untuk Execute');const h=await api('GET','/health');if(!h.execute_enabled)throw Error('Backend staging belum mengaktifkan Execute. Jalankan job/worker staging dengan izin internal');state.requestKey=uuid();await saveSnapshots(state.rows);await saveMeta({request_key:state.requestKey,stage:'submitting'});note('Membuat job di Flask (tidak mengulangi SQL saat retry)...');let response;try{response=await api('POST','/api/v1/transporter-prices/jobs',{workbook_id:state.workbookId,rows:state.rows,preview_proof:state.preview.preview_proof,confirm:'EXECUTE_STAGING'},{'Idempotency-Key':state.requestKey});}catch(err){try{response=await findJobByKey();}catch{throw Error('Status POST tidak pasti. Request key tersimpan; gunakan Resume, jangan execute ulang. '+err.message);}}
+state.jobId=response.job_id;await saveMeta({job_id:state.jobId,stage:'running'});el('job-ref').textContent=`Job ID: ${state.jobId}`;await monitorAndSync();}catch(e){note('Execute: '+e.message,true);}finally{busy(false);}}
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function monitorAndSync(){if(!state.jobId)throw Error('Belum ada job');let job;for(let i=0;i<120;i++){job=await api('GET',`/api/v1/transporter-prices/jobs/${encodeURIComponent(state.jobId)}`);const pct=job.total_rows?Math.round(100*job.completed_rows/job.total_rows):0;el('progress').value=pct;el('counts').textContent=`${job.completed_rows}/${job.total_rows} processed · ${job.success_rows} success · ${job.failed_rows} non-success`;if(job.status==='completed')break;if(job.status==='failed')throw Error('Job gagal: '+(job.last_error||'periksa server'));await sleep(2500);}if(job?.status!=='completed')throw Error('Job belum selesai. Gunakan Resume, jangan Execute lagi.');if(job.sync_status==='synced'){note('Job sudah tersinkronisasi.');await saveMeta({job_id:'',request_key:'',stage:'synced'});state.jobId=null;return;}await syncResults();}
+function canonical(x){if(x===null||typeof x!=='object')return JSON.stringify(x);if(Array.isArray(x))return '['+x.map(canonical).join(',')+']';return '{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}';}
+async function sha256(x){const bytes=new TextEncoder().encode(canonical(x));const buffer=await crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(buffer),b=>b.toString(16).padStart(2,'0')).join('');}
+async function syncResults(){const results=await api('GET',`/api/v1/transporter-prices/jobs/${encodeURIComponent(state.jobId)}/results`);const meta=await workbookMeta();const sheet=meta?.sheet_name||state.sheetName;const current=await readWorkbook(false,sheet);const map=new Map(current.rows.map(r=>[r.row_id,r]));const saved=state.rows||await loadSnapshots();
+// Results must be immutable and bound to exact job's original row digest.
+const statuses=[];const deletions=[];let unsafe=[];for(const result of results.results){const r=map.get(result.row_id);if(!r){if(result.status==='success'&&saved.some(x=>x.row_id===result.row_id)&&await sha256(saved.find(x=>x.row_id===result.row_id))===result.input_digest)continue;unsafe.push(`Row ${result.row_id} hilang, status ${result.status}`);continue;}if(saved.length){const original=saved.find(x=>x.row_id===result.row_id);if(!original||await sha256(original)!==result.input_digest||!eqInput(r,original)){unsafe.push(`Row ${result.row_id} berubah atau digest mismatch`);continue;}}else{ // Recovery after re-opening: sheet_row is part of the server's digest; verify with original sheet_row from stored immutable job result is unavailable.
+  // Safety-first: do not delete without saved snapshot. Manual escalation is required.
+  unsafe.push(`Row ${result.row_id}: snapshot asli tidak tersedia setelah browser reload`);continue;
+}
+if(result.status==='success')deletions.push(r);else statuses.push({row:r,status:result.status,error:result.error_message||result.status});}
+if(unsafe.length)throw Error('Cleanup dibatalkan demi keamanan: '+unsafe.slice(0,3).join('; '));
+note(`Menulis hasil ${statuses.length} non-success, kemudian menghapus ${deletions.length} success...`);
+await Excel.run(async ctx=>{const ws=ctx.workbook.worksheets.getItem(sheet);for(const item of statuses){const n=item.row.sheet_row;ws.getRange(`AF${n}:AH${n}`).values=[[item.status.toUpperCase(),item.error,item.row.row_id]];}await ctx.sync();});
+// Delete from bottom to top; retry can detect already deleted row by row_id.
+for(const item of deletions.sort((a,b)=>b.sheet_row-a.sheet_row)){
+ await Excel.run(async ctx=>{const ws=ctx.workbook.worksheets.getItem(sheet);ws.getRange(`${item.sheet_row}:${item.sheet_row}`).delete(Excel.DeleteShiftDirection.up);await ctx.sync();});
+}
+const after=await readWorkbook(false,sheet,true);const remainingIds=new Set(after.rows.map(x=>x.row_id));if(deletions.some(d=>remainingIds.has(d.row_id)))throw Error('Verifikasi penghapusan row success gagal');
+await api('POST',`/api/v1/transporter-prices/jobs/${encodeURIComponent(state.jobId)}/sync-ack`,{confirmed:true});await saveMeta({job_id:'',request_key:'',stage:'synced'});note(`SELESAI: ${deletions.length} success dihapus; ${statuses.length} non-success dipertahankan. Tidak ada UPDATE kedua.`);state.jobId=null;state.preview=null;state.rows=null;el('job-ref').textContent='Job ID: —';}
+async function recover(){busy(true);try{const meta=await workbookMeta();if(!meta?.workbook_id||!meta?.request_key)throw Error('Tidak ada job/recovery key di workbook');state.workbookId=meta.workbook_id;state.sheetName=meta.sheet_name;state.requestKey=meta.request_key;state.jobId=meta.job_id||null;if(!state.jobId){let existing;try{existing=await findJobByKey();}catch(e){
+  if(String(e.message).startsWith('HTTP 404:')){await saveMeta({request_key:'',job_id:'',stage:'no_job_found'});state.requestKey=null;note('Request belum menghasilkan job di server. Aman untuk Preview ulang.');return;}
+  throw e;
+}state.jobId=existing.job_id;await saveMeta({job_id:state.jobId,stage:'running'});}el('job-ref').textContent=`Job ID: ${state.jobId}`;
+state.rows=await loadSnapshots();if(!state.rows.length)throw Error('Snapshot asli hilang dari workbook. Cleanup otomatis diblokir.');await monitorAndSync();}catch(e){note('Recovery: '+e.message,true);}finally{busy(false);}}
+el('preview').addEventListener('click',doPreview);el('execute').addEventListener('click',doExecute);el('recover').addEventListener('click',recover);
+Office.onReady(info=>{if(info.host!==Office.HostType.Excel){note('Add-in harus dijalankan di Excel Online',true);return;}state.office=true;el('connection').textContent='Excel Online terhubung. URL/token staging diisi manual.';busy(false);workbookMeta().then(meta=>{if(meta?.job_id||meta?.request_key){el('job-ref').textContent=`Job ID: ${meta.job_id||'pending lookup by request key'}`;note('Ada proses tersimpan di workbook. Gunakan Recovery dulu.');}}).catch(e=>log('Meta unavailable: '+e.message));});

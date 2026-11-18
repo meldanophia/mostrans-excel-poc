@@ -118,6 +118,41 @@ def register_poc05(app, helpers):
             app.logger.exception('POC05 preview failed')
             return jsonify(error=f'Dry-run gagal: {type(exc).__name__}. Periksa log Flask.'),503
 
+    @app.route('/poc/price-results',methods=['POST','OPTIONS'])
+    def price_results_read_only():
+        # Return committed per-row outcomes for POC06 without replaying UPDATE.
+        if request.method=='OPTIONS': return '',204
+        if not require_token(): return jsonify(error='Token POC tidak valid'),401
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict) or data.get('operation')!='POC_PRICE_RESULTS_READ_ONLY':
+            return jsonify(error='Operation tidak valid'),400
+        job_key=data.get('job_key')
+        if not isinstance(job_key,str) or not 16<=len(job_key)<=100 or not all(c.isalnum() or c=='-' for c in job_key):
+            return jsonify(error='job_key tidak valid'),400
+        url=os.getenv('DATABASE_URL')
+        if not url or psycopg is None:
+            return jsonify(error='Koneksi database staging belum tersedia'),503
+        try:
+            with psycopg.connect(url,connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    cur.execute('SET TRANSACTION READ ONLY')
+                    cur.execute("SET LOCAL statement_timeout='10000ms'")
+                    cur.execute('''SELECT row_id,input_digest,status,target_id,error_message
+                                   FROM public.mt_poc_price_execution_log
+                                   WHERE job_key=%s ORDER BY id ASC LIMIT 51''',(job_key,))
+                    records=cur.fetchall()
+            if not records:
+                return jsonify(error='Job tidak ditemukan pada tabel log staging'),404
+            if len(records)>50:
+                return jsonify(error='POC06 maksimum 50 row per job'),400
+            results=[{'row_id':r[0],'input_digest':r[1],'status':r[2],
+                      'target_id':r[3],'error_message':r[4] or ''} for r in records]
+            return jsonify(status='job_results',job_key=job_key,total_rows=len(results),
+                           results=results,db_updated=False)
+        except Exception:
+            app.logger.exception('POC06 read job results failed')
+            return jsonify(error='Gagal membaca log staging; periksa Flask log'),503
+
     @app.route('/poc/price-execute',methods=['POST','OPTIONS'])
     def price_execute():
         if request.method=='OPTIONS': return '',204

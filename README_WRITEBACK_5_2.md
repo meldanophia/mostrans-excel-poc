@@ -1,3 +1,0 @@
-# POC 05.2 — Simplified write-back
-
-Problem: POC 05.1 stuck at "Memeriksa header output dan isi worksheet…" during the Office.js header preflight read/sync. This build skips reading output header cells and sends header + per-row writes in one Excel.run / context.sync. The source A–K snapshot check is retained. **Do not use in production**: Z:AD and AF:AH must be reserved exclusively for POC; existing content in those output columns may be overwritten. Use a duplicate workbook. No changes to Flask API, DB, or manifest required. If the simplified sync also hangs, diagnose Excel Online workbook/session/browser health before further code changes. After write, manually verify cells in Excel. Do not enable Execute staging via public tunnel.

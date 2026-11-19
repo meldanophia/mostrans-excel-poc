@@ -5,17 +5,17 @@
  xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
  xsi:type="TaskPaneApp">
   <Id>8b94be52-156d-4ca4-bc36-82404de98215</Id>
-  <Version>1.0.2.0</Version>
+  <Version>1.0.3.0</Version>
   <ProviderName>Mostrans</ProviderName>
   <DefaultLocale>id-ID</DefaultLocale>
   <DisplayName DefaultValue="Mostrans Price Tools DEV"/>
   <Description DefaultValue="Validasi dan inaktivasi harga transporter menggunakan Backend Flask API DEV."/>
   <IconUrl DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/assets/icon32.png"/>
   <HighResolutionIconUrl DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/assets/icon80.png"/>
-  <SupportUrl DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/taskpane.html?v=phase2-api-base-fix-2"/>
+  <SupportUrl DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/taskpane.html?v=phase2-ui-refinement-1"/>
   <AppDomains><AppDomain>https://meldanophia.github.io</AppDomain></AppDomains>
   <Hosts><Host Name="Workbook"/></Hosts>
-  <DefaultSettings><SourceLocation DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/taskpane.html?v=phase2-api-base-fix-2"/></DefaultSettings>
+  <DefaultSettings><SourceLocation DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/taskpane.html?v=phase2-ui-refinement-1"/></DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
     <Hosts><Host xsi:type="Workbook">
@@ -41,7 +41,7 @@
       <bt:Images><bt:Image id="Res.Icon16" DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/assets/icon16.png"/>
         <bt:Image id="Res.Icon32" DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/assets/icon32.png"/>
         <bt:Image id="Res.Icon80" DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/assets/icon80.png"/></bt:Images>
-      <bt:Urls><bt:Url id="Res.Taskpane.Url" DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/taskpane.html?v=phase2-api-base-fix-2"/></bt:Urls>
+      <bt:Urls><bt:Url id="Res.Taskpane.Url" DefaultValue="https://meldanophia.github.io/mostrans-excel-poc/web/taskpane.html?v=phase2-ui-refinement-1"/></bt:Urls>
       <bt:ShortStrings><bt:String id="Res.Group.Label" DefaultValue="Mostrans Tools"/>
         <bt:String id="Res.Button.Label" DefaultValue="Mostrans Price Tools"/>
         <bt:String id="Res.GetStarted.Title" DefaultValue="Mostrans Price Tools"/></bt:ShortStrings>
